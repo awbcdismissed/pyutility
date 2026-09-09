@@ -18,8 +18,6 @@ from tabs.dashboard import DashboardTab
 from tabs.cpu import CPUTab
 from tabs.gpu import GPUTab
 from tabs.processes import ProcessTab
-from tabs.history import HistoryTab
-from tabs.speedtest import SpeedTesterTab
 from tabs.mic import MicTab
 from tabs.install import InstallTab
 from tabs.system import SystemTab
@@ -30,10 +28,13 @@ from tabs.backup import BackupTab
 from tabs.logs import LogsTab
 from tabs.drivers import DriversTab
 from tabs.devices import DevicesTab
+from tabs.diagnosis import DiagnosisTab
+from tabs.ai_assistant import AIAssistantTab
 from tabs.i18n import LANGUAGES, translate_text, translate_widget_tree
 from tabs.animations import AnimationController
 
 LOGO_URL = "https://i.postimg.cc/dQNsp0tf/PAP-Logo.jpg"
+LOGO_CACHE_NAME = "splash_logo.jpg"
 
 
 def is_admin():
@@ -75,26 +76,52 @@ def build_blank_logo(size=600):
     return pixmap
 
 
+def _logo_cache_path():
+    base_path = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base_path, "PyUtility", LOGO_CACHE_NAME)
+
+
+def _scaled_logo(data, size):
+    image = QPixmap()
+    if image.loadFromData(data):
+        return image.scaled(
+            size,
+            size,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+    return None
+
+
 def load_logo_from_url(size=600):
-    last_error = None
-    for _ in range(5):
-        try:
-            response = requests.get(LOGO_URL, timeout=8)
-            if response.status_code != 200:
-                last_error = f"HTTP {response.status_code}"
-                continue
-            image = QPixmap()
-            if image.loadFromData(response.content):
-                return image.scaled(
-                    size,
-                    size,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            last_error = "The URL did not return a valid image"
-        except requests.RequestException as exc:
-            last_error = str(exc)
-    raise RuntimeError(f"Could not load the application logo from {LOGO_URL}: {last_error}")
+    cache_path = _logo_cache_path()
+
+    try:
+        with open(cache_path, "rb") as cache_file:
+            cached_logo = _scaled_logo(cache_file.read(), size)
+        if cached_logo is not None:
+            return cached_logo
+    except OSError:
+        pass
+
+    try:
+        response = requests.get(LOGO_URL, timeout=(1.5, 2.5))
+        if response.ok:
+            logo_data = response.content
+            logo = _scaled_logo(logo_data, size)
+            if logo is not None:
+                try:
+                    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                    temporary_path = f"{cache_path}.tmp"
+                    with open(temporary_path, "wb") as cache_file:
+                        cache_file.write(logo_data)
+                    os.replace(temporary_path, cache_path)
+                except OSError:
+                    pass
+                return logo
+    except requests.RequestException:
+        pass
+    return build_blank_logo(size)
 
 
 def create_splash_screen(pixmap):
@@ -175,7 +202,6 @@ class ModernMonitorApp(QMainWindow):
         self.tab_cpu = CPUTab()
         self.tab_gpu = GPUTab(initial_gpu_data)
         self.tab_processes = ProcessTab()
-        self.tab_speedtest = SpeedTesterTab()
         self.tab_mic = MicTab()
         self.tab_install = InstallTab()
         self.tab_system = SystemTab()
@@ -186,15 +212,18 @@ class ModernMonitorApp(QMainWindow):
         self.tab_logs = LogsTab()
         self.tab_drivers = DriversTab()
         self.tab_devices = DevicesTab()
-        self.tab_history = HistoryTab()
+        self.tab_diagnosis = DiagnosisTab()
+        self.tab_ai_assistant = AIAssistantTab(
+            collector=self.tab_diagnosis.collector,
+            history=self.tab_diagnosis.history,
+            engine=self.tab_diagnosis.engine,
+        )
 
         # Adicionar abas
         self.tabs.addTab(self.tab_dashboard, "Início")
         self.tabs.addTab(self.tab_cpu, "CPU")
         self.tabs.addTab(self.tab_gpu, "GPU")
         self.tabs.addTab(self.tab_processes, "Processos")
-        self.tabs.addTab(self.tab_history, "Histórico")
-        self.tabs.addTab(self.tab_speedtest, "Teste de velocidade")
         self.tabs.addTab(self.tab_mic, "Manutenção")
         self.tabs.addTab(self.tab_install, "Instalar")
         self.tabs.addTab(self.tab_system, "Sistema")
@@ -205,6 +234,8 @@ class ModernMonitorApp(QMainWindow):
         self.tabs.addTab(self.tab_logs, "Registos")
         self.tabs.addTab(self.tab_drivers, "Controladores")
         self.tabs.addTab(self.tab_devices, "Dispositivos")
+        self.tabs.addTab(self.tab_diagnosis, "Diagnóstico")
+        self.tabs.addTab(self.tab_ai_assistant, "AI Assistant")
         self.current_language = "pt"
         self.tabs.currentChanged.connect(lambda index: self.motion.animate_tab(self.tabs, index))
         QTimer.singleShot(0, lambda: self.motion.animate_tab(self.tabs, self.tabs.currentIndex()))
@@ -221,8 +252,6 @@ class ModernMonitorApp(QMainWindow):
             self.tab_dashboard,
             self.tab_cpu,
             self.tab_processes,
-            self.tab_history,
-            self.tab_speedtest,
             self.tab_mic,
             self.tab_install,
             self.tab_system,
@@ -233,6 +262,7 @@ class ModernMonitorApp(QMainWindow):
             self.tab_logs,
             self.tab_drivers,
             self.tab_devices,
+            self.tab_diagnosis,
         ):
             try:
                 tab.update_data()
@@ -240,17 +270,9 @@ class ModernMonitorApp(QMainWindow):
                 pass
 
     def refresh_active_tab(self):
-        idx = self.tabs.currentIndex()
-        map_tabs = {
-            0: self.tab_dashboard, 1: self.tab_cpu, 2: self.tab_gpu,
-            3: self.tab_processes, 4: self.tab_history, 5: self.tab_speedtest,
-            6: self.tab_mic, 7: self.tab_install, 8: self.tab_system,
-            9: self.tab_wifi, 10: self.tab_startup, 11: self.tab_security,
-            12: self.tab_backup, 13: self.tab_logs, 14: self.tab_drivers,
-            15: self.tab_devices
-        }
-        if idx in map_tabs:
-            map_tabs[idx].update_data()
+        current_tab = self.tabs.currentWidget()
+        if current_tab is not None and callable(getattr(current_tab, "update_data", None)):
+            current_tab.update_data()
 
     def change_theme(self, theme):
         if theme in ("Tema claro", "Light theme"):
@@ -289,6 +311,10 @@ class ModernMonitorApp(QMainWindow):
         translate_widget_tree(self, language)
         for index in range(self.tabs.count()):
             self.tabs.setTabText(index, translate_text(self.tabs.tabText(index), language))
+        for tab in (self.tab_diagnosis, self.tab_ai_assistant):
+            set_language = getattr(tab, "set_language", None)
+            if callable(set_language):
+                set_language(language)
         self.statusBar().showMessage(translate_text(
             "Feito por Martim Oliveira 12ºGEI - 2026", language
         ))
@@ -372,7 +398,6 @@ if __name__ == "__main__":
             window.tab_cpu,
             window.tab_gpu,
             window.tab_processes,
-            window.tab_history,
             window.tab_system,
             window.tab_wifi,
             window.tab_startup,

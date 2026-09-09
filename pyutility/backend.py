@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import base64
 import stat
 import shutil
 import time
@@ -134,6 +135,7 @@ class SystemMonitor:
                 text=True,
                 creationflags=subprocess.CREATE_NO_WINDOW,
                 check=False,
+                timeout=5,
             )
             if res.returncode == 0 and res.stdout.strip():
                 data = json.loads(res.stdout.strip())
@@ -853,7 +855,10 @@ th {{ background: #eaf3fa; color: #174a6e; }} tr:nth-child(even) {{ background: 
     def get_processes():
         procs = []
         for p in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent']):
-            try: procs.append(p.info)
+            try:
+                if (p.info.get('name') or '').strip().lower() in {'system idle process', 'idle'}:
+                    continue
+                procs.append(p.info)
             except: continue
         return procs
 
@@ -924,147 +929,108 @@ th {{ background: #eaf3fa; color: #174a6e; }} tr:nth-child(even) {{ background: 
         except: return "N/D"
 
     @staticmethod
-    def _median(values):
-        if not values:
-            return 0.0
-        ordered = sorted(values)
-        mid = len(ordered) // 2
-        if len(ordered) % 2 == 0:
-            return (ordered[mid - 1] + ordered[mid]) / 2.0
-        return ordered[mid]
-
-    @staticmethod
-    def ensure_console_streams():
-        if sys.stdout is None:
-            sys.stdout = open(os.devnull, "w", encoding="utf-8")
-        if sys.stderr is None:
-            sys.stderr = open(os.devnull, "w", encoding="utf-8")
-
-    @staticmethod
-    def run_speed_test(iterations=3):
-        SystemMonitor.ensure_console_streams()
-        print(f"[DEBUG][SpeedTest] starting run_speed_test(iterations={iterations})")
-        result = {
-            "download_mbps": 0.0,
-            "upload_mbps": 0.0,
-            "ping_ms": 0,
-            "status": "Erro",
-            "error": ""
-        }
-
-        try:
-            import speedtest
-
-            print("[DEBUG][SpeedTest] speedtest-cli imported successfully")
-            samples = []
-            for i in range(iterations):
-                print(f"[DEBUG][SpeedTest] iteration {i + 1}/{iterations} starting")
-                st = speedtest.Speedtest()
-                st.get_best_server()
-                ping = float(st.results.ping or 0)
-                download_bps = float(st.download())
-                upload_bps = float(st.upload())
-
-                sample = {
-                    "ping_ms": ping,
-                    "download_mbps": download_bps / 1_000_000,
-                    "upload_mbps": upload_bps / 1_000_000
-                }
-                samples.append(sample)
-                print(f"[DEBUG][SpeedTest] iteration {i + 1}/{iterations} sample -> ping={ping}ms, download={sample['download_mbps']:.2f}Mbps, upload={sample['upload_mbps']:.2f}Mbps")
-
-            if samples:
-                result["ping_ms"] = SystemMonitor._median([s["ping_ms"] for s in samples])
-                result["download_mbps"] = SystemMonitor._median([s["download_mbps"] for s in samples])
-                result["upload_mbps"] = SystemMonitor._median([s["upload_mbps"] for s in samples])
-                result["status"] = "OK"
-                print(f"[DEBUG][SpeedTest] median result -> ping={result['ping_ms']}ms, download={result['download_mbps']:.2f}Mbps, upload={result['upload_mbps']:.2f}Mbps")
-                return result
-
-        except Exception as exc:
-            result["error"] = str(exc)
-            print(f"[DEBUG][SpeedTest] exception: {exc}")
-
-        print(f"[DEBUG][SpeedTest] returning failed result: {result}")
-        return result
-
-    @staticmethod
     def ensure_chocolatey():
-        print("[DEBUG][Misc] checking if Chocolatey is installed")
-        try:
-            res = subprocess.run(["choco", "--version"], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
-            if res.returncode == 0:
-                print("[DEBUG][Misc] Chocolatey already installed")
-                return True, "Chocolatey já está instalado."
-        except Exception as exc:
-            print(f"[DEBUG][Misc] choco not found: {exc}")
-            pass
+        return SystemMonitor.ensure_package_manager("Chocolatey")
 
-        script = (
-            "Set-ExecutionPolicy Bypass -Scope Process -Force; "
-            "[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12; "
-            "iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))"
+    @staticmethod
+    def _package_manager_info(manager):
+        managers = {
+            "Chocolatey": ("choco", "Chocolatey"),
+            "Winget": ("winget", "Winget"),
+        }
+        try:
+            return managers[manager]
+        except KeyError:
+            raise ValueError(f"Gestor de pacotes desconhecido: {manager}")
+
+    @staticmethod
+    def _run_visible_powershell(command):
+        encoded = base64.b64encode(command.encode("utf-16le")).decode("ascii")
+        powershell = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        arguments = [
+            powershell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-EncodedCommand",
+            encoded,
+        ]
+        flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+        if SystemMonitor.is_admin():
+            return subprocess.run(arguments, creationflags=flags, check=False)
+
+        escaped = encoded.replace("'", "''")
+        elevate = (
+            "Start-Process powershell.exe -Verb RunAs -Wait "
+            f"-ArgumentList '-NoProfile -ExecutionPolicy Bypass -EncodedCommand {escaped}'"
+        )
+        return subprocess.run(
+            [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", elevate],
+            creationflags=flags,
+            check=False,
         )
 
-        try:
-            print("[DEBUG][Misc] attempting to install Chocolatey with UAC elevation")
-            if not SystemMonitor.is_admin():
-                proc = SystemMonitor.run_elevated_powershell(script)
-            else:
-                powershell = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
-                proc = subprocess.run([powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+    @staticmethod
+    def ensure_package_manager(manager):
+        executable, display_name = SystemMonitor._package_manager_info(manager)
+        if shutil.which(executable):
+            return True, f"{display_name} já está instalado."
 
+        if manager == "Chocolatey":
+            script = (
+                "Set-ExecutionPolicy Bypass -Scope Process -Force; "
+                "[System.Net.ServicePointManager]::SecurityProtocol = "
+                "[System.Net.SecurityProtocolType]::Tls12; "
+                "iex ((New-Object System.Net.WebClient).DownloadString("
+                "'https://community.chocolatey.org/install.ps1'))"
+            )
+        else:
+            script = (
+                "$ErrorActionPreference = 'Stop'; "
+                "$path = Join-Path $env:TEMP 'Microsoft.DesktopAppInstaller.msixbundle'; "
+                "Invoke-WebRequest -Uri 'https://aka.ms/getwinget' -OutFile $path; "
+                "Add-AppxPackage -Path $path; Remove-Item $path -Force"
+            )
+
+        process = SystemMonitor._run_visible_powershell(script)
+        if process.returncode != 0:
+            return False, f"Falha ao instalar o {display_name}."
+
+        if manager == "Chocolatey":
+            choco_bin = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "chocolatey", "bin")
+            if choco_bin not in os.environ.get("PATH", "").split(os.pathsep):
+                os.environ["PATH"] = choco_bin + os.pathsep + os.environ.get("PATH", "")
+
+        return True, f"{display_name} foi instalado com sucesso."
+
+    @staticmethod
+    def install_package(package_name, manager="Chocolatey", command=None):
+        ok, message = SystemMonitor.ensure_package_manager(manager)
+        if not ok:
+            return False, message
+
+        try:
+            executable, display_name = SystemMonitor._package_manager_info(manager)
+            if command:
+                install_command = command.strip()
+            elif manager == "Winget":
+                install_command = (
+                    f'winget install --id "{package_name}" '
+                    "--accept-source-agreements --accept-package-agreements"
+                )
+            else:
+                install_command = f'choco install "{package_name}" --yes --no-progress'
+
+            proc = SystemMonitor._run_visible_powershell(install_command)
             if proc.returncode == 0:
-                print("[DEBUG][Misc] Chocolatey installed successfully")
-                return True, "Chocolatey foi instalado com sucesso."
-            err = proc.stderr.strip() or proc.stdout.strip() or "Falha ao instalar o Chocolatey."
-            print(f"[DEBUG][Misc] Chocolatey install failed: {err}")
-            return False, err
-        except Exception as exc:
-            print(f"[DEBUG][Misc] error while installing Chocolatey: {exc}")
+                return True, f"{package_name} foi instalado com sucesso."
+            return False, f"Erro ao instalar o pacote com {display_name}."
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
             return False, str(exc)
 
     @staticmethod
     def install_choco_package(package_name, command=None):
-        print(f"[DEBUG][Misc] install_choco_package called for package: {package_name}, command={command}")
-        ok, message = SystemMonitor.ensure_chocolatey()
-        if not ok:
-            print(f"[DEBUG][Misc] cannot install {package_name}: {message}")
-            return False, message
-
-        try:
-            if command:
-                install_command = command.strip()
-            else:
-                install_command = f'choco install "{package_name}" --yes --no-progress'
-
-            print(f"[DEBUG][Misc] running elevated command: {install_command}")
-            if not SystemMonitor.is_admin():
-                proc = SystemMonitor.run_elevated_powershell(install_command)
-            elif command:
-                powershell = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
-                proc = subprocess.run(
-                    [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", install_command],
-                    capture_output=True,
-                    text=True,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
-            else:
-                proc = subprocess.run(
-                    ["choco", "install", package_name, "--yes", "--no-progress"],
-                    capture_output=True,
-                    text=True,
-                    creationflags=subprocess.CREATE_NO_WINDOW
-                )
-            if proc.returncode == 0:
-                print(f"[DEBUG][Misc] package {package_name} install succeeded")
-                return True, f"{package_name} foi instalado com sucesso."
-            err = proc.stderr.strip() or proc.stdout.strip() or "Erro ao instalar o pacote."
-            print(f"[DEBUG][Misc] package {package_name} install failed: {err}")
-            return False, err
-        except Exception as exc:
-            print(f"[DEBUG][Misc] exception while installing {package_name}: {exc}")
-            return False, str(exc)
+        return SystemMonitor.install_package(package_name, "Chocolatey", command)
 
     @staticmethod
     def safe_remove_path(path):

@@ -17,20 +17,23 @@ class ToolWorker(QObject):
 
     def run(self):
         print(f"[DEBUG][Mic] ToolWorker.run started for action={self.action}")
-        if self.action == "disk_cleanup":
-            ok, msg = SystemMonitor.run_disk_cleanup()
-        elif self.action == "temp_clean":
-            ok, msg = SystemMonitor.clean_temp_folders()
-        elif self.action == "flush_dns":
-            ok, msg = SystemMonitor.flush_dns_cache()
-        elif self.action == "check_system_files":
-            ok, msg = SystemMonitor.check_system_files()
-        elif self.action == "windows_update":
-            ok, msg = SystemMonitor.open_windows_update()
-        elif self.action == "system_report":
-            ok, msg = SystemMonitor.save_system_report(self.report_path)
-        else:
-            ok, msg = False, "Ação desconhecida."
+        try:
+            if self.action == "disk_cleanup":
+                ok, msg = SystemMonitor.run_disk_cleanup()
+            elif self.action == "temp_clean":
+                ok, msg = SystemMonitor.clean_temp_folders()
+            elif self.action == "flush_dns":
+                ok, msg = SystemMonitor.flush_dns_cache()
+            elif self.action == "check_system_files":
+                ok, msg = SystemMonitor.check_system_files()
+            elif self.action == "windows_update":
+                ok, msg = SystemMonitor.open_windows_update()
+            elif self.action == "system_report":
+                ok, msg = SystemMonitor.save_system_report(self.report_path)
+            else:
+                ok, msg = False, "Ação desconhecida."
+        except Exception as exc:
+            ok, msg = False, str(exc)
 
         print(f"[DEBUG][Mic] ToolWorker.run finished for action={self.action}: ok={ok}, msg={msg}")
         self.finished.emit(self.action, ok, msg)
